@@ -15,6 +15,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const PISTON_URL = Deno.env.get('PISTON_URL') ?? 'https://emkc.org/api/v2/piston';
 const RUN_TIMEOUT_MS = 5000;
+const MAX_REQUEST_BYTES = 100_000;
+const MAX_CODE_CHARACTERS = 50_000;
+const MAX_TESTCASES_PER_SUBMISSION = 100;
 
 const LANGUAGE_ALIASES: Record<string, string> = {
   javascript: 'javascript',
@@ -98,6 +101,11 @@ Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders() });
 
   try {
+    const contentLength = Number(req.headers.get('content-length') ?? 0);
+    if (contentLength > MAX_REQUEST_BYTES) {
+      return new Response(JSON.stringify({ error: 'Request is too large. Keep submissions under 100 KB.' }), { status: 413, headers: corsHeaders() });
+    }
+
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
       return new Response(JSON.stringify({ error: 'Missing Authorization header' }), { status: 401, headers: corsHeaders() });
@@ -118,8 +126,17 @@ Deno.serve(async (req) => {
     const userId = userData.user.id;
 
     const { problem_id, language, code } = await req.json();
-    if (!problem_id || !language || typeof code !== 'string' || !code.trim()) {
+    if (typeof problem_id !== 'string' || !problem_id.trim() || typeof language !== 'string' || typeof code !== 'string' || !code.trim()) {
       return new Response(JSON.stringify({ error: 'problem_id, language, and non-empty code are required' }), { status: 400, headers: corsHeaders() });
+    }
+
+    if (code.length > MAX_CODE_CHARACTERS) {
+      return new Response(JSON.stringify({ error: 'Code is too long. The limit is 50,000 characters.' }), { status: 413, headers: corsHeaders() });
+    }
+
+    const normalizedLanguage = language.toLowerCase();
+    if (!Object.prototype.hasOwnProperty.call(LANGUAGE_ALIASES, normalizedLanguage)) {
+      return new Response(JSON.stringify({ error: 'Unsupported language. Use JavaScript, TypeScript, Python, Java, C++, or Go.' }), { status: 400, headers: corsHeaders() });
     }
 
     // Service-role client bypasses RLS — this is the only place testcases are read.
@@ -134,6 +151,10 @@ Deno.serve(async (req) => {
     if (tcError) throw tcError;
     if (!testcases || testcases.length === 0) {
       return new Response(JSON.stringify({ error: 'This problem has no test cases configured yet.' }), { status: 422, headers: corsHeaders() });
+    }
+
+    if (testcases.length > MAX_TESTCASES_PER_SUBMISSION) {
+      return new Response(JSON.stringify({ error: 'This problem has too many test cases configured.' }), { status: 422, headers: corsHeaders() });
     }
 
     let verdict: Verdict = 'Accepted';
